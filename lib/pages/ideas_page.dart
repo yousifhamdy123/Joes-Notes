@@ -17,6 +17,7 @@ const _textColors = [
   0xFF000000, 0xFF0D2B66, 0xFFB71C1C, 0xFF1B5E20, 0xFF4A148C, 0xFFFFFFFF,
 ];
 const _fonts = <String, String>{
+  ...kArabicFonts,
   'font_sans': 'sans-serif',
   'font_serif': 'serif',
   'font_mono': 'monospace',

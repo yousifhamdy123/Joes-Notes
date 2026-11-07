@@ -1,6 +1,6 @@
 """Run after `flutter create --platforms=android .`
 Patches the generated Android project for: scheduled notifications,
-core-library desugaring and the app label."""
+microphone recording, core-library desugaring, minSdk and the app label."""
 import glob
 import re
 
@@ -14,6 +14,7 @@ perms = """
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.VIBRATE"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
 """
 receivers = """
         <receiver android:exported="false"
@@ -54,6 +55,7 @@ if gradle.endswith(".kts"):
             1,
         )
         src += '\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n'
+    src = src.replace("minSdk = flutter.minSdkVersion", "minSdk = 24")
 else:
     if "coreLibraryDesugaringEnabled" not in src:
         src = src.replace(
@@ -62,5 +64,6 @@ else:
             1,
         )
         src += "\ndependencies {\n    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'\n}\n"
+    src = src.replace("minSdkVersion flutter.minSdkVersion", "minSdkVersion 24")
 open(gradle, "w", encoding="utf-8").write(src)
 print("Android project patched:", gradle)

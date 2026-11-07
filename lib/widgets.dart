@@ -8,27 +8,44 @@ const kOrange = Color(0xFFFF8A00);
 const kCard = Color(0xFF141414);
 const kCardBorder = Color(0xFF262626);
 
+/// Arabic fonts bundled by the build (tool/setup_fonts.py), label -> family.
+const kArabicFonts = <String, String>{
+  'Cairo': 'Cairo',
+  'Tajawal': 'Tajawal',
+  'Amiri': 'Amiri',
+  'Aref Ruqaa': 'Aref Ruqaa',
+  'Reem Kufi': 'Reem Kufi',
+};
+
 class AppSearchField extends StatelessWidget {
   final ValueChanged<String> onChanged;
-  const AppSearchField({super.key, required this.onChanged});
+  final Widget? trailing;
+  const AppSearchField({super.key, required this.onChanged, this.trailing});
 
   @override
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-      child: TextField(
-        onChanged: onChanged,
-        decoration: InputDecoration(
-          hintText: t('search'),
-          prefixIcon: const Icon(Icons.search_rounded),
-          filled: true,
-          fillColor: const Color(0xFF151515),
-          contentPadding: const EdgeInsets.symmetric(vertical: 14),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(18),
-            borderSide: BorderSide.none,
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              onChanged: onChanged,
+              decoration: InputDecoration(
+                hintText: t('search'),
+                prefixIcon: const Icon(Icons.search_rounded),
+                filled: true,
+                fillColor: const Color(0xFF151515),
+                contentPadding: const EdgeInsets.symmetric(vertical: 14),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(18),
+                  borderSide: BorderSide.none,
+                ),
+              ),
+            ),
           ),
-        ),
+          if (trailing != null) ...[const SizedBox(width: 8), trailing!],
+        ],
       ),
     );
   }
