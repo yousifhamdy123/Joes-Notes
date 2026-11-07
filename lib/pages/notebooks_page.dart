@@ -28,7 +28,7 @@ Future<String?> askNotebookName(BuildContext context,
         ),
         TextButton(
           onPressed: () => Navigator.pop(ctx, ctl.text),
-          child: Text(t('save'), style: const TextStyle(color: kOrange)),
+          child: Text(t('save'), style: TextStyle(color: kOrange)),
         ),
       ],
     ),

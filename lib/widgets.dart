@@ -3,10 +3,26 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 
 import 'l10n.dart';
+import 'store.dart';
 
-const kOrange = Color(0xFFFF8A00);
-const kCard = Color(0xFF141414);
-const kCardBorder = Color(0xFF262626);
+/// Theme colors follow the user's settings (accent + background).
+Color get kOrange => Color(Store.i.accent.value);
+Color get kBg => Store.i.bgGray.value ? const Color(0xFF121212) : Colors.black;
+Color get kCard =>
+    Store.i.bgGray.value ? const Color(0xFF1F1F1F) : const Color(0xFF141414);
+Color get kCardBorder =>
+    Store.i.bgGray.value ? const Color(0xFF333333) : const Color(0xFF262626);
+
+const kAccentChoices = <int>[
+  0xFFFF8A00, 0xFF42A5F5, 0xFF66BB6A, 0xFFEC407A,
+  0xFFAB47BC, 0xFFEF5350, 0xFF26C6DA, 0xFFFFCA28,
+];
+
+/// Dark tints for note cards (index 0 = default).
+const kNoteColors = <int>[
+  0, 0xFF4A2323, 0xFF4A3516, 0xFF45401A, 0xFF1F3D2B, 0xFF1D3750, 0xFF3B2852,
+  0xFF4A2539,
+];
 
 /// Arabic fonts bundled by the build (tool/setup_fonts.py), label -> family.
 const kArabicFonts = <String, String>{

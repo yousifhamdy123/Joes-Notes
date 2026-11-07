@@ -203,7 +203,7 @@ class _AudioTileState extends State<AudioTile> {
                 child: Container(
                   width: 38,
                   height: 38,
-                  decoration: const BoxDecoration(
+                  decoration: BoxDecoration(
                     color: kOrange,
                     shape: BoxShape.circle,
                   ),

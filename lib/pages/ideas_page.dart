@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -218,6 +219,39 @@ class _IdeaSheetState extends State<_IdeaSheet> {
     super.dispose();
   }
 
+  /// Turns the sticky into a note or a task (the sticky stays on the board).
+  Future<void> _convert(bool toTask) async {
+    final text = _text.text.trim();
+    if (text.isEmpty) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final msg = toTask ? t('converted_task') : t('converted_note');
+    final now = DateTime.now();
+    if (toTask) {
+      final lines = text.split('\n');
+      final first = lines.first;
+      await Store.i.upsertTask(TaskItem(
+        id: Store.newId(),
+        notifId: Store.newNotifId(),
+        title: first.length > 80 ? first.substring(0, 80) : first,
+        note: lines.skip(1).join('\n').trim(),
+        created: now,
+      ));
+    } else {
+      await Store.i.upsertNote(Note(
+        id: Store.newId(),
+        delta: jsonEncode([
+          {'insert': '$text\n'}
+        ]),
+        plain: text,
+        created: now,
+        updated: now,
+      ));
+    }
+    _i.text = text;
+    if (mounted) Navigator.pop(context, _i);
+    messenger.showSnackBar(SnackBar(content: Text(msg)));
+  }
+
   Widget _label(String s) => Padding(
         padding: const EdgeInsets.only(top: 14, bottom: 6),
         child: Text(s,
@@ -325,6 +359,28 @@ class _IdeaSheetState extends State<_IdeaSheet> {
                 ),
               ],
             ),
+            if (!widget.isNew) ...[
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => _convert(false),
+                      icon: const Icon(Icons.sticky_note_2_outlined, size: 18),
+                      label: Text(t('idea_to_note')),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => _convert(true),
+                      icon: const Icon(Icons.check_circle_outline, size: 18),
+                      label: Text(t('idea_to_task')),
+                    ),
+                  ),
+                ],
+              ),
+            ],
             const SizedBox(height: 18),
             Row(
               children: [

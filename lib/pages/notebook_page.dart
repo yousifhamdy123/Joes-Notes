@@ -4,7 +4,6 @@ import '../l10n.dart';
 import '../models.dart';
 import '../store.dart';
 import '../widgets.dart';
-import 'note_editor.dart';
 import 'notebooks_page.dart';
 import 'notes_widgets.dart';
 
@@ -20,12 +19,8 @@ class NotebookPage extends StatefulWidget {
 class _NotebookPageState extends State<NotebookPage> {
   String _q = '';
 
-  void _open([Note? n]) => Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (_) =>
-              NoteEditorPage(note: n, notebookId: widget.notebookId),
-        ),
-      );
+  void _open([Note? n]) =>
+      openNote(context, n, notebookId: widget.notebookId);
 
   Future<void> _menu(String v, Notebook b) async {
     if (v == 'rename') {
@@ -48,7 +43,7 @@ class _NotebookPageState extends State<NotebookPage> {
       listenable: Listenable.merge([Store.i, Store.i.lang]),
       builder: (context, _) {
         final book = Store.i.notebookById(widget.notebookId);
-        final notes = Store.i.notes
+        final notes = Store.i.activeNotes
             .where((n) => widget.notebookId == null
                 ? n.notebooks.isEmpty
                 : n.notebooks.contains(widget.notebookId))

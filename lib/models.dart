@@ -50,6 +50,11 @@ class Note {
   List<String> keywords;
   List<String> notebooks; // notebook ids (a note can be in several)
   List<Attachment> attachments;
+  bool pinned;
+  int color; // 0 = default card
+  bool archived;
+  bool locked;
+  DateTime? deletedAt; // non-null = in trash
   DateTime created;
   DateTime updated;
 
@@ -61,9 +66,17 @@ class Note {
     this.keywords = const [],
     this.notebooks = const [],
     this.attachments = const [],
+    this.pinned = false,
+    this.color = 0,
+    this.archived = false,
+    this.locked = false,
+    this.deletedAt,
     required this.created,
     required this.updated,
   });
+
+  bool get inTrash => deletedAt != null;
+  bool get isActive => !archived && deletedAt == null;
 
   int get imageCount => attachments.where((e) => e.isImage).length;
   int get audioCount => attachments.where((e) => e.isAudio).length;
@@ -76,6 +89,11 @@ class Note {
         'keywords': keywords,
         'notebooks': notebooks,
         'attachments': attachments.map((e) => e.toJson()).toList(),
+        'pinned': pinned,
+        'color': color,
+        'archived': archived,
+        'locked': locked,
+        'deletedAt': deletedAt?.toIso8601String(),
         'created': created.toIso8601String(),
         'updated': updated.toIso8601String(),
       };
@@ -93,9 +111,25 @@ class Note {
         attachments: ((j['attachments'] ?? const []) as List)
             .map((e) => Attachment.fromJson(Map<String, dynamic>.from(e)))
             .toList(),
+        pinned: j['pinned'] ?? false,
+        color: j['color'] ?? 0,
+        archived: j['archived'] ?? false,
+        locked: j['locked'] ?? false,
+        deletedAt:
+            j['deletedAt'] == null ? null : DateTime.parse(j['deletedAt']),
         created: DateTime.parse(j['created']),
         updated: DateTime.parse(j['updated']),
       );
+}
+
+class SubTask {
+  String title;
+  bool done;
+  SubTask({required this.title, this.done = false});
+
+  Map<String, dynamic> toJson() => {'title': title, 'done': done};
+  factory SubTask.fromJson(Map<String, dynamic> j) =>
+      SubTask(title: j['title'] ?? '', done: j['done'] ?? false);
 }
 
 class TaskItem {
@@ -105,6 +139,9 @@ class TaskItem {
   String note;
   bool done;
   DateTime? remind;
+  String repeat; // none | daily | weekly | monthly
+  int priority; // 0 normal, 1 low, 2 medium, 3 high
+  List<SubTask> subtasks;
   DateTime created;
 
   TaskItem({
@@ -114,8 +151,33 @@ class TaskItem {
     this.note = '',
     this.done = false,
     this.remind,
+    this.repeat = 'none',
+    this.priority = 0,
+    this.subtasks = const [],
     required this.created,
   });
+
+  bool get repeats => repeat != 'none' && remind != null;
+
+  /// The next occurrence strictly after [from] for a repeating task.
+  DateTime? nextAfter(DateTime from) {
+    var d = remind;
+    if (d == null || repeat == 'none') return null;
+    var guard = 0;
+    while (!d!.isAfter(from) && guard++ < 2000) {
+      switch (repeat) {
+        case 'daily':
+          d = DateTime(d.year, d.month, d.day + 1, d.hour, d.minute);
+          break;
+        case 'weekly':
+          d = DateTime(d.year, d.month, d.day + 7, d.hour, d.minute);
+          break;
+        default:
+          d = DateTime(d.year, d.month + 1, d.day, d.hour, d.minute);
+      }
+    }
+    return d;
+  }
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -124,6 +186,9 @@ class TaskItem {
         'note': note,
         'done': done,
         'remind': remind?.toIso8601String(),
+        'repeat': repeat,
+        'priority': priority,
+        'subtasks': subtasks.map((e) => e.toJson()).toList(),
         'created': created.toIso8601String(),
       };
 
@@ -134,6 +199,11 @@ class TaskItem {
         note: j['note'] ?? '',
         done: j['done'] ?? false,
         remind: j['remind'] == null ? null : DateTime.parse(j['remind']),
+        repeat: j['repeat'] ?? 'none',
+        priority: j['priority'] ?? 0,
+        subtasks: ((j['subtasks'] ?? const []) as List)
+            .map((e) => SubTask.fromJson(Map<String, dynamic>.from(e)))
+            .toList(),
         created: DateTime.parse(j['created']),
       );
 }

@@ -1,17 +1,21 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_quill/flutter_quill.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import '../l10n.dart';
+import '../lock.dart';
 import '../models.dart';
 import '../store.dart';
+import '../templates.dart';
 import '../widgets.dart';
 import 'attachments.dart';
 import 'notebooks_page.dart' show askNotebookName;
-import 'notes_widgets.dart' show fmtDate;
+import 'notes_widgets.dart' show fmtDate, snack;
 
 const _highlightColors = [
   '#FFF59D', '#FFCC80', '#F8BBD0', '#C5E1A5', '#81D4FA', '#CE93D8',
@@ -41,30 +45,55 @@ TextStyle _customStyle(Attribute a) {
   return const TextStyle();
 }
 
+int _countWords(String s) =>
+    s.split(RegExp(r'\s+')).where((w) => w.trim().isNotEmpty).length;
+
 class NoteEditorPage extends StatefulWidget {
   final Note? note;
   final String? notebookId; // preset when adding from inside a notebook
-  const NoteEditorPage({super.key, this.note, this.notebookId});
+  final String? initialText; // text shared from another app
+  const NoteEditorPage({
+    super.key,
+    this.note,
+    this.notebookId,
+    this.initialText,
+  });
 
   @override
   State<NoteEditorPage> createState() => _NoteEditorPageState();
 }
 
-class _NoteEditorPageState extends State<NoteEditorPage> {
+class _NoteEditorPageState extends State<NoteEditorPage>
+    with WidgetsBindingObserver {
   late final QuillController _c;
   late final TextEditingController _title;
   late final DateTime _created;
+  late final String _id;
   late final List<String> _keywords;
   late final List<Attachment> _atts;
-  final List<Attachment> _removed = [];
   late final Set<String> _books;
+  final List<Attachment> _removed = [];
+  final ValueNotifier<int> _words = ValueNotifier(0);
+  StreamSubscription<dynamic>? _docSub;
+  Timer? _debounce;
+
+  bool _pinned = false;
+  bool _archived = false;
+  bool _locked = false;
+  int _color = 0;
   bool _tools = false;
-  bool _saved = false;
+  bool _skipFinal = false;
+
+  final stt.SpeechToText _speech = stt.SpeechToText();
+  bool _speechReady = false;
+  bool _dictating = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     final n = widget.note;
+    _id = n?.id ?? Store.newId();
     _created = n?.created ?? DateTime.now();
     _title = TextEditingController(text: n?.title ?? '');
     _keywords = [...?n?.keywords];
@@ -73,49 +102,92 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
       ...?n?.notebooks,
       if (n == null && widget.notebookId != null) widget.notebookId!,
     };
+    _pinned = n?.pinned ?? false;
+    _archived = n?.archived ?? false;
+    _locked = n?.locked ?? false;
+    _color = n?.color ?? 0;
+
     Document doc;
     try {
       doc = n == null ? Document() : Document.fromJson(jsonDecode(n.delta));
     } catch (_) {
       doc = Document();
     }
+    if (n == null && (widget.initialText ?? '').isNotEmpty) {
+      doc.insert(0, widget.initialText!);
+    }
     _c = QuillController(
       document: doc,
       selection: const TextSelection.collapsed(offset: 0),
     );
+    _bindDoc();
+    _title.addListener(_scheduleSave);
+  }
+
+  /// (Re)subscribes to the current document: word count + autosave.
+  void _bindDoc() {
+    _docSub?.cancel();
+    _words.value = _countWords(_c.document.toPlainText());
+    _docSub = _c.document.changes.listen((_) {
+      _words.value = _countWords(_c.document.toPlainText());
+      _scheduleSave();
+    });
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _debounce?.cancel();
+    _docSub?.cancel();
+    _speech.cancel();
     _c.dispose();
     _title.dispose();
+    _words.dispose();
     super.dispose();
   }
 
-  Future<void> _save() async {
-    if (_saved) return;
-    _saved = true;
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) _persist();
+  }
+
+  // ---- saving ----
+  void _scheduleSave() {
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 1200), _persist);
+  }
+
+  Future<void> _persist({bool finalSave = false}) async {
+    if (_skipFinal) return;
+    _debounce?.cancel();
     final plain = _c.document.toPlainText().trim();
     final title = _title.text.trim();
-    final existing = widget.note;
-    await Store.i.deleteFiles(_removed);
     final empty =
         plain.isEmpty && title.isEmpty && _atts.isEmpty && _keywords.isEmpty;
     if (empty) {
-      if (existing != null) await Store.i.deleteNote(existing.id);
+      if (finalSave && Store.i.noteById(_id) != null) {
+        await Store.i.deleteNote(_id);
+      }
       return;
     }
+    final old = Store.i.noteById(_id);
     await Store.i.upsertNote(Note(
-      id: existing?.id ?? Store.newId(),
+      id: _id,
       title: title,
       delta: jsonEncode(_c.document.toDelta().toJson()),
       plain: plain,
-      keywords: _keywords,
+      keywords: [..._keywords],
       notebooks: _books.toList(),
-      attachments: _atts,
+      attachments: [..._atts],
+      pinned: _pinned,
+      color: _color,
+      archived: _archived,
+      locked: _locked,
+      deletedAt: old?.deletedAt,
       created: _created,
       updated: DateTime.now(),
     ));
+    if (finalSave) await Store.i.deleteFiles(_removed);
   }
 
   // ---- keywords ----
@@ -138,7 +210,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, ctl.text),
-            child: Text(t('add'), style: const TextStyle(color: kOrange)),
+            child: Text(t('add'), style: TextStyle(color: kOrange)),
           ),
         ],
       ),
@@ -154,6 +226,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         if (!_keywords.contains(p)) _keywords.add(p);
       }
     });
+    _scheduleSave();
   }
 
   // ---- notebooks (a note can belong to several) ----
@@ -192,12 +265,13 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
                           _books.remove(b.id);
                         }
                       });
+                      _scheduleSave();
                     },
                   ),
                 ListTile(
-                  leading: const Icon(Icons.add_rounded, color: kOrange),
+                  leading: Icon(Icons.add_rounded, color: kOrange),
                   title: Text(t('new_notebook'),
-                      style: const TextStyle(color: kOrange)),
+                      style: TextStyle(color: kOrange)),
                   onTap: () async {
                     final name = await askNotebookName(ctx);
                     if (name == null) return;
@@ -206,6 +280,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
                     await Store.i.upsertNotebook(nb);
                     setSheet(() {});
                     setState(() => _books.add(nb.id));
+                    _scheduleSave();
                   },
                 ),
               ],
@@ -275,6 +350,209 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         : Attribute.fromKeyValue('background', r));
   }
 
+  // ---- inserting text (dictation, templates, date) ----
+  void _insertText(String text) {
+    if (text.isEmpty) return;
+    final len = _c.document.length;
+    var off = _c.selection.baseOffset;
+    if (off < 0 || off > len - 1) off = len - 1;
+    _c.replaceText(
+      off,
+      0,
+      text,
+      TextSelection.collapsed(offset: off + text.length),
+    );
+  }
+
+  void _insertDate() => _insertText('${fmtDate(DateTime.now())} ');
+
+  Future<void> _toggleDictation() async {
+    if (_dictating) {
+      await _speech.stop();
+      if (mounted) setState(() => _dictating = false);
+      return;
+    }
+    try {
+      if (!_speechReady) {
+        _speechReady = await _speech.initialize(
+          onStatus: (s) {
+            if ((s == 'done' || s == 'notListening') && mounted) {
+              setState(() => _dictating = false);
+            }
+          },
+          onError: (_) {
+            if (mounted) setState(() => _dictating = false);
+          },
+        );
+      }
+      if (!_speechReady) {
+        if (mounted) snack(context, t('dictate_unavailable'));
+        return;
+      }
+      String? localeId;
+      final want = Store.i.lang.value == 'ar' ? 'ar' : 'en';
+      final locales = await _speech.locales();
+      final match = locales
+          .where((l) => l.localeId.toLowerCase().startsWith(want))
+          .toList();
+      if (match.isNotEmpty) {
+        final eg = match.where((l) => l.localeId.toLowerCase().contains('eg'));
+        localeId = (eg.isNotEmpty ? eg.first : match.first).localeId;
+      }
+      if (mounted) setState(() => _dictating = true);
+      await _speech.listen(
+        onResult: (r) {
+          if (r.finalResult) _insertText('${r.recognizedWords} ');
+        },
+        localeId: localeId,
+        listenFor: const Duration(minutes: 2),
+        pauseFor: const Duration(seconds: 6),
+      );
+    } catch (_) {
+      if (mounted) {
+        setState(() => _dictating = false);
+        snack(context, t('dictate_unavailable'));
+      }
+    }
+  }
+
+  Future<void> _pickTemplate() async {
+    final id = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: const Color(0xFF111111),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+              child: Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: Text(t('templates'),
+                    style: const TextStyle(
+                        fontSize: 17, fontWeight: FontWeight.w800)),
+              ),
+            ),
+            for (final tpl in kTemplates)
+              ListTile(
+                leading: Icon(tpl.icon, color: kOrange),
+                title: Text(t('tpl_${tpl.id}')),
+                onTap: () => Navigator.pop(ctx, tpl.id),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (id == null) return;
+    final isEmpty = _c.document.toPlainText().trim().isEmpty;
+    if (isEmpty) {
+      _c.document = Document.fromJson(templateDelta(id));
+      _bindDoc();
+      if (_title.text.trim().isEmpty) _title.text = templateTitle(id);
+      setState(() {});
+    } else {
+      _insertText('${templatePlain(id)}\n');
+    }
+    _scheduleSave();
+  }
+
+  // ---- note options (pin, color, lock, archive, trash) ----
+  Future<void> _pickColor() async {
+    final c = await showModalBottomSheet<int>(
+      context: context,
+      backgroundColor: const Color(0xFF111111),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(t('note_color'),
+                  style: const TextStyle(
+                      fontSize: 17, fontWeight: FontWeight.w800)),
+              const SizedBox(height: 14),
+              Wrap(
+                spacing: 14,
+                runSpacing: 14,
+                children: [
+                  for (final col in kNoteColors)
+                    GestureDetector(
+                      onTap: () => Navigator.pop(ctx, col),
+                      child: Container(
+                        width: 44,
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: col == 0 ? kCard : Color(col),
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: col == _color ? kOrange : Colors.white24,
+                            width: col == _color ? 3 : 1,
+                          ),
+                        ),
+                        child: col == 0
+                            ? const Icon(Icons.format_color_reset_outlined,
+                                size: 20, color: Colors.white54)
+                            : null,
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (c == null) return;
+    setState(() => _color = c);
+    _scheduleSave();
+  }
+
+  Future<void> _toggleLock() async {
+    if (_locked) {
+      if (!await authenticate()) {
+        if (mounted) snack(context, t('auth_failed'));
+        return;
+      }
+      setState(() => _locked = false);
+    } else {
+      if (!await deviceCanAuth()) {
+        if (mounted) snack(context, t('auth_unavailable'));
+        return;
+      }
+      setState(() => _locked = true);
+    }
+    _scheduleSave();
+  }
+
+  Future<void> _moveAway({required bool toTrash}) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final nav = Navigator.of(context);
+    await _persist();
+    final n = Store.i.noteById(_id);
+    _skipFinal = true;
+    if (n != null) {
+      if (toTrash) {
+        await Store.i.trashNote(n);
+      } else {
+        await Store.i.setArchived(n, true);
+      }
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+          content: Text(toTrash ? t('moved_trash') : t('moved_archive')),
+          action: SnackBarAction(
+            label: t('undo'),
+            textColor: kOrange,
+            onPressed: () => toTrash
+                ? Store.i.restoreNote(n)
+                : Store.i.setArchived(n, false),
+          ),
+        ));
+    }
+    nav.pop();
+  }
+
   // ---- attachments ----
   Future<void> _addImage() async {
     final src = await showModalBottomSheet<ImageSource>(
@@ -322,6 +600,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         ));
       }
       if (mounted) setState(() {});
+      _scheduleSave();
     } catch (_) {}
   }
 
@@ -334,12 +613,16 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
       backgroundColor: const Color(0xFF111111),
       builder: (_) => const RecordSheet(),
     );
-    if (a != null) setState(() => _atts.add(a));
+    if (a != null) {
+      setState(() => _atts.add(a));
+      _scheduleSave();
+    }
   }
 
   void _removeAttachment(Attachment a) {
     setState(() => _atts.removeWhere((e) => e.id == a.id));
     _removed.add(a);
+    _scheduleSave();
   }
 
   // ---- UI ----
@@ -356,16 +639,15 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         children: [
           if (books.isEmpty)
             ActionChip(
-              avatar: const Icon(Icons.menu_book_rounded,
-                  size: 16, color: kOrange),
+              avatar: Icon(Icons.menu_book_rounded, size: 16, color: kOrange),
               label: Text(t('unassigned')),
               onPressed: _pickNotebook,
             )
           else
             for (final b in books) ...[
               ActionChip(
-                avatar: const Icon(Icons.menu_book_rounded,
-                    size: 16, color: kOrange),
+                avatar:
+                    Icon(Icons.menu_book_rounded, size: 16, color: kOrange),
                 label: Text(b.name),
                 onPressed: _pickNotebook,
               ),
@@ -375,7 +657,10 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
           for (final k in _keywords) ...[
             InputChip(
               label: Text('# $k'),
-              onDeleted: () => setState(() => _keywords.remove(k)),
+              onDeleted: () {
+                setState(() => _keywords.remove(k));
+                _scheduleSave();
+              },
               deleteIconColor: Colors.white54,
             ),
             const SizedBox(width: 8),
@@ -449,11 +734,11 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
 
   Widget _bottomBar() {
     Widget btn(IconData icon, String tip, VoidCallback onTap,
-        {bool active = false}) {
+        {bool active = false, Color? color}) {
       return IconButton(
         tooltip: tip,
         onPressed: onTap,
-        icon: Icon(icon, color: active ? kOrange : Colors.white70),
+        icon: Icon(icon, color: color ?? (active ? kOrange : Colors.white70)),
         style: IconButton.styleFrom(
           backgroundColor:
               active ? kOrange.withValues(alpha: 0.2) : Colors.transparent,
@@ -469,11 +754,41 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       child: Row(
         children: [
-          btn(Icons.text_fields_rounded, t('text_tools'),
-              () => setState(() => _tools = !_tools),
-              active: _tools),
-          btn(Icons.image_outlined, t('add_image'), _addImage),
-          btn(Icons.mic_none_rounded, t('record_voice'), _record),
+          Expanded(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  btn(Icons.text_fields_rounded, t('text_tools'),
+                      () => setState(() => _tools = !_tools),
+                      active: _tools),
+                  btn(Icons.image_outlined, t('add_image'), _addImage),
+                  btn(Icons.mic_none_rounded, t('record_voice'), _record),
+                  btn(
+                    _dictating
+                        ? Icons.stop_circle_outlined
+                        : Icons.keyboard_voice_outlined,
+                    _dictating ? t('listening') : t('dictate'),
+                    _toggleDictation,
+                    active: _dictating,
+                    color: _dictating ? Colors.redAccent : null,
+                  ),
+                  btn(Icons.dashboard_customize_outlined, t('templates'),
+                      _pickTemplate),
+                  btn(Icons.event_outlined, t('insert_date'), _insertDate),
+                ],
+              ),
+            ),
+          ),
+          ValueListenableBuilder<int>(
+            valueListenable: _words,
+            builder: (_, n, __) => Padding(
+              padding: const EdgeInsetsDirectional.only(start: 8, end: 6),
+              child: Text('$n ${t('words_word')}',
+                  style:
+                      const TextStyle(fontSize: 12, color: Colors.white54)),
+            ),
+          ),
         ],
       ),
     );
@@ -484,20 +799,93 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     return PopScope(
       canPop: true,
       onPopInvokedWithResult: (didPop, _) {
-        if (didPop) _save();
+        if (didPop && !_skipFinal) _persist(finalSave: true);
       },
       child: Scaffold(
         appBar: AppBar(
           title: Text(
             '${t('created')}: ${fmtDate(_created)}',
-            style: const TextStyle(fontSize: 14, color: Colors.white60),
+            style: const TextStyle(fontSize: 13, color: Colors.white60),
           ),
           actions: [
+            PopupMenuButton<String>(
+              icon: const Icon(Icons.more_vert_rounded),
+              onSelected: (v) {
+                switch (v) {
+                  case 'pin':
+                    setState(() => _pinned = !_pinned);
+                    _scheduleSave();
+                    break;
+                  case 'color':
+                    _pickColor();
+                    break;
+                  case 'lock':
+                    _toggleLock();
+                    break;
+                  case 'archive':
+                    _moveAway(toTrash: false);
+                    break;
+                  case 'trash':
+                    _moveAway(toTrash: true);
+                    break;
+                }
+              },
+              itemBuilder: (_) => [
+                PopupMenuItem(
+                  value: 'pin',
+                  child: Row(children: [
+                    Icon(_pinned ? Icons.push_pin : Icons.push_pin_outlined,
+                        size: 20),
+                    const SizedBox(width: 10),
+                    Text(_pinned ? t('unpin') : t('pin')),
+                  ]),
+                ),
+                PopupMenuItem(
+                  value: 'color',
+                  child: Row(children: [
+                    const Icon(Icons.palette_outlined, size: 20),
+                    const SizedBox(width: 10),
+                    Text(t('note_color')),
+                  ]),
+                ),
+                PopupMenuItem(
+                  value: 'lock',
+                  child: Row(children: [
+                    Icon(
+                        _locked
+                            ? Icons.lock_open_rounded
+                            : Icons.lock_outline_rounded,
+                        size: 20),
+                    const SizedBox(width: 10),
+                    Text(_locked ? t('unlock') : t('lock')),
+                  ]),
+                ),
+                PopupMenuItem(
+                  value: 'archive',
+                  child: Row(children: [
+                    const Icon(Icons.archive_outlined, size: 20),
+                    const SizedBox(width: 10),
+                    Text(t('archive_note')),
+                  ]),
+                ),
+                PopupMenuItem(
+                  value: 'trash',
+                  child: Row(children: [
+                    const Icon(Icons.delete_outline,
+                        size: 20, color: Colors.redAccent),
+                    const SizedBox(width: 10),
+                    Text(t('move_to_trash'),
+                        style: const TextStyle(color: Colors.redAccent)),
+                  ]),
+                ),
+              ],
+            ),
             IconButton(
-              icon: const Icon(Icons.check_rounded, color: kOrange, size: 28),
+              icon: Icon(Icons.check_rounded, color: kOrange, size: 28),
               tooltip: t('save'),
               onPressed: () async {
-                await _save();
+                await _persist(finalSave: true);
+                _skipFinal = true;
                 if (mounted) Navigator.of(context).pop();
               },
             ),

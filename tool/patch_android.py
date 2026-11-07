@@ -2,6 +2,7 @@
 Patches the generated Android project for: scheduled notifications,
 microphone recording, core-library desugaring, minSdk and the app label."""
 import glob
+import os
 import re
 
 # ---- AndroidManifest.xml ---------------------------------------------------
@@ -15,6 +16,7 @@ perms = """
     <uses-permission android:name="android.permission.VIBRATE"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
 """
 receivers = """
         <receiver android:exported="false"
@@ -37,6 +39,25 @@ if "ScheduledNotificationReceiver" not in xml:
     xml = xml.replace("</application>", receivers + "    </application>", 1)
 
 xml = re.sub(r'android:label="[^"]*"', 'android:label="Joe&apos;s Notes"', xml, count=1)
+
+# speech recognition (dictation) must be visible on Android 11+
+if "android.speech.RecognitionService" not in xml:
+    q = '<intent><action android:name="android.speech.RecognitionService"/></intent>'
+    if "<queries>" in xml:
+        xml = xml.replace("<queries>", "<queries>\n        " + q, 1)
+    else:
+        xml = xml.replace("</manifest>", "    <queries>\n        " + q + "\n    </queries>\n</manifest>", 1)
+
+# receive text shared from other apps ("Share" -> Joe's Notes)
+if "android.intent.action.SEND" not in xml:
+    share = """
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="text/plain"/>
+            </intent-filter>
+        """
+    xml = xml.replace("</activity>", share + "</activity>", 1)
 open(path, "w", encoding="utf-8").write(xml)
 
 # ---- app/build.gradle(.kts) -----------------------------------------------
@@ -65,5 +86,100 @@ else:
         )
         src += "\ndependencies {\n    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'\n}\n"
     src = src.replace("minSdkVersion flutter.minSdkVersion", "minSdkVersion 24")
+
+
+# ---- release signing (fixed key, so updates install over older versions) ----
+if os.environ.get("KEYSTORE_PATH") and os.environ.get("KEY_ALIAS"):
+    is_kts = gradle.endswith(".kts")
+    if is_kts:
+        block = """    signingConfigs {
+        create("release") {
+            storeFile = file(System.getenv("KEYSTORE_PATH"))
+            storePassword = System.getenv("KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("KEY_ALIAS")
+            keyPassword = System.getenv("KEY_PASSWORD")
+        }
+    }
+    buildTypes {"""
+        src = src.replace("    buildTypes {", block, 1)
+        src = src.replace('signingConfig = signingConfigs.getByName("debug")',
+                          'signingConfig = signingConfigs.getByName("release")')
+    else:
+        block = """    signingConfigs {
+        release {
+            storeFile file(System.getenv("KEYSTORE_PATH"))
+            storePassword System.getenv("KEYSTORE_PASSWORD")
+            keyAlias System.getenv("KEY_ALIAS")
+            keyPassword System.getenv("KEY_PASSWORD")
+        }
+    }
+    buildTypes {"""
+        src = src.replace("    buildTypes {", block, 1)
+        src = src.replace("signingConfig signingConfigs.debug",
+                          "signingConfig signingConfigs.release")
+    assert "signingConfigs" in src and "getByName(\"release\")" in src or "signingConfigs.release" in src, "signing patch failed"
+    print("Release signing enabled")
+else:
+    print("WARNING: no signing key, using debug key")
+
 open(gradle, "w", encoding="utf-8").write(src)
 print("Android project patched:", gradle)
+
+# ---- MainActivity: FragmentActivity (fingerprint prompt) + share channel ----
+kt_files = glob.glob("android/app/src/main/kotlin/**/MainActivity.kt", recursive=True)
+assert kt_files, "MainActivity.kt not found"
+kt = kt_files[0]
+pkg = re.search(r"^package\s+([\w.]+)", open(kt, encoding="utf-8").read(), re.M).group(1)
+open(kt, "w", encoding="utf-8").write("""package %s
+
+import android.content.Intent
+import io.flutter.embedding.android.FlutterFragmentActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
+
+class MainActivity : FlutterFragmentActivity() {
+    private var channel: MethodChannel? = null
+    private var pending: String? = null
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        readShared(intent)
+        channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "joes/share")
+        channel?.setMethodCallHandler { call, result ->
+            if (call.method == "getShared") {
+                result.success(pending)
+                pending = null
+            } else {
+                result.notImplemented()
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        readShared(intent)
+        val text = pending
+        if (text != null) {
+            channel?.invokeMethod("shared", text)
+            pending = null
+        }
+    }
+
+    private fun readShared(i: Intent?) {
+        if (i != null && i.action == Intent.ACTION_SEND && i.type?.startsWith("text/") == true) {
+            pending = i.getStringExtra(Intent.EXTRA_TEXT)
+        }
+    }
+}
+""" % pkg)
+print("MainActivity patched:", kt)
+
+# local_auth's prompt needs an AppCompat theme on the launch activity
+for st in glob.glob("android/app/src/main/res/values*/styles.xml"):
+    x = open(st, encoding="utf-8").read()
+    y = re.sub(r'(<style name="(?:LaunchTheme|NormalTheme)" parent=")[^"]+(")',
+               r'\1Theme.AppCompat.DayNight.NoActionBar\2', x)
+    if y != x:
+        open(st, "w", encoding="utf-8").write(y)
+        print("theme patched:", st)
