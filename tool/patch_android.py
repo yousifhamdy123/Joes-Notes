@@ -125,6 +125,46 @@ else:
 open(gradle, "w", encoding="utf-8").write(src)
 print("Android project patched:", gradle)
 
+# ---- force compileSdk 36 on every plugin (some pin older versions) ----------
+root = None
+for cand in ("android/build.gradle.kts", "android/build.gradle"):
+    if os.path.exists(cand):
+        root = cand
+        break
+assert root, "root build.gradle not found"
+rsrc = open(root, encoding="utf-8").read()
+if "joes-compile-sdk" not in rsrc:
+    if root.endswith(".kts"):
+        fix = """// joes-compile-sdk
+subprojects {
+    afterEvaluate {
+        extensions.findByName("android")?.withGroovyBuilder {
+            "compileSdkVersion"(36)
+        }
+    }
+}
+
+"""
+    else:
+        fix = """// joes-compile-sdk
+subprojects {
+    afterEvaluate { p ->
+        if (p.hasProperty('android')) {
+            p.android.compileSdkVersion 36
+        }
+    }
+}
+
+"""
+    marker = "subprojects {"
+    if marker in rsrc:
+        i = rsrc.index(marker)
+        rsrc = rsrc[:i] + fix + rsrc[i:]
+    else:
+        rsrc += "\n" + fix
+    open(root, "w", encoding="utf-8").write(rsrc)
+    print("compileSdk 36 forced via", root)
+
 # ---- MainActivity: FragmentActivity (fingerprint prompt) + share channel ----
 kt_files = glob.glob("android/app/src/main/kotlin/**/MainActivity.kt", recursive=True)
 assert kt_files, "MainActivity.kt not found"
