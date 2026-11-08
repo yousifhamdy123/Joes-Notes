@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_quill/flutter_quill.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:record/record.dart' as rec;
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import '../l10n.dart';
@@ -32,6 +33,10 @@ Color? _parseHex(String s) {
 /// Soft, feathered highlight: translucent colour with blurred edges instead
 /// of Quill's default hard rectangle.
 TextStyle _customStyle(Attribute a) {
+  // Make sure the chosen font is really applied (Arabic fonts included).
+  if (a.key == 'font' && a.value is String && a.value != 'Clear') {
+    return TextStyle(fontFamily: a.value as String);
+  }
   if (a.key == 'background' && a.value is String) {
     final c = _parseHex(a.value as String);
     if (c != null) {
@@ -84,6 +89,17 @@ class _NoteEditorPageState extends State<NoteEditorPage>
   bool _tools = false;
   bool _skipFinal = false;
 
+  // voice recording while typing
+  final rec.AudioRecorder _recorder = rec.AudioRecorder();
+  bool _recording = false;
+  String? _recPath;
+  final Stopwatch _recSw = Stopwatch();
+  Timer? _recTimer;
+  int _recSec = 0;
+  List<int> _stamps = []; // per character: ms into the recording (-1 = old)
+  final ValueNotifier<int?> _syncMs = ValueNotifier(null);
+  Attachment? _syncAtt;
+
   final stt.SpeechToText _speech = stt.SpeechToText();
   bool _speechReady = false;
   bool _dictating = false;
@@ -128,10 +144,57 @@ class _NoteEditorPageState extends State<NoteEditorPage>
   void _bindDoc() {
     _docSub?.cancel();
     _words.value = _countWords(_c.document.toPlainText());
-    _docSub = _c.document.changes.listen((_) {
+    _docSub = _c.document.changes.listen((e) {
+      _trackChange(e);
       _words.value = _countWords(_c.document.toPlainText());
       _scheduleSave();
     });
+  }
+
+  /// Keeps the recording time-stamps and the synced-word marks of every
+  /// recording in step with the text while it is edited.
+  void _trackChange(dynamic event) {
+    try {
+      final change = event.change;
+      if (change == null) return;
+      final ms = _recSw.elapsedMilliseconds;
+      var pos = 0;
+      for (final op in (change.toList() as List)) {
+        if (op.isRetain as bool) {
+          pos += op.length as int;
+        } else if (op.isInsert as bool) {
+          final n = op.length as int;
+          if (_recording) {
+            final at = pos.clamp(0, _stamps.length).toInt();
+            _stamps.insertAll(at, List<int>.filled(n, ms));
+          }
+          for (final a in _atts) {
+            for (final m in a.marks) {
+              if (pos <= m[0]) {
+                m[0] += n;
+                m[1] += n;
+              } else if (pos < m[1]) {
+                m[1] += n;
+              }
+            }
+          }
+          pos += n;
+        } else if (op.isDelete as bool) {
+          final n = op.length as int;
+          if (_recording && pos < _stamps.length) {
+            _stamps.removeRange(pos, (pos + n).clamp(0, _stamps.length).toInt());
+          }
+          int f(int x) => x <= pos ? x : (x >= pos + n ? x - n : pos);
+          for (final a in _atts) {
+            for (final m in a.marks) {
+              m[0] = f(m[0]);
+              m[1] = f(m[1]);
+            }
+            a.marks.removeWhere((m) => m[1] <= m[0]);
+          }
+        }
+      }
+    } catch (_) {}
   }
 
   @override
@@ -140,6 +203,9 @@ class _NoteEditorPageState extends State<NoteEditorPage>
     _debounce?.cancel();
     _docSub?.cancel();
     _speech.cancel();
+    _recTimer?.cancel();
+    if (!_recording) _recorder.dispose();
+    _syncMs.dispose();
     _c.dispose();
     _title.dispose();
     _words.dispose();
@@ -370,6 +436,10 @@ class _NoteEditorPageState extends State<NoteEditorPage>
     if (_dictating) {
       await _speech.stop();
       if (mounted) setState(() => _dictating = false);
+      return;
+    }
+    if (_recording) {
+      if (mounted) snack(context, t('rec_no_dictate'));
       return;
     }
     try {
@@ -604,19 +674,198 @@ class _NoteEditorPageState extends State<NoteEditorPage>
     } catch (_) {}
   }
 
-  Future<void> _record() async {
-    FocusScope.of(context).unfocus();
-    final a = await showModalBottomSheet<Attachment>(
-      context: context,
-      isDismissible: false,
-      enableDrag: false,
-      backgroundColor: const Color(0xFF111111),
-      builder: (_) => const RecordSheet(),
-    );
-    if (a != null) {
-      setState(() => _atts.add(a));
-      _scheduleSave();
+  /// Starts / stops a recording without blocking the editor, so the text
+  /// can be written while recording.
+  Future<void> _toggleRecording() async {
+    if (_recording) {
+      await _stopRecording(keep: true);
+      return;
     }
+    try {
+      if (_dictating) await _toggleDictation();
+      if (!await _recorder.hasPermission()) {
+        if (mounted) snack(context, t('mic_denied'));
+        return;
+      }
+      final path = Store.i.newAttachPath('m4a');
+      await _recorder.start(
+        const rec.RecordConfig(encoder: rec.AudioEncoder.aacLc),
+        path: path,
+      );
+      _recPath = path;
+      _stamps = List<int>.filled(_c.document.toPlainText().length, -1);
+      _recSw
+        ..reset()
+        ..start();
+      _recSec = 0;
+      _recTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() => _recSec = _recSw.elapsed.inSeconds);
+      });
+      if (mounted) setState(() => _recording = true);
+    } catch (_) {
+      if (mounted) snack(context, t('mic_denied'));
+    }
+  }
+
+  /// One entry per word typed during the recording: [start, end, ms].
+  List<List<int>> _buildMarks() {
+    final text = _c.document.toPlainText();
+    final marks = <List<int>>[];
+    bool space(String ch) => ch.trim().isEmpty;
+    var i = 0;
+    while (i < text.length) {
+      if (space(text[i])) {
+        i++;
+        continue;
+      }
+      var j = i;
+      var start = -1;
+      var ms = -1;
+      while (j < text.length && !space(text[j])) {
+        if (ms < 0 && j < _stamps.length && _stamps[j] >= 0) {
+          ms = _stamps[j];
+          start = j;
+        }
+        j++;
+      }
+      if (ms >= 0) marks.add([start, j, ms]);
+      i = j;
+    }
+    return marks;
+  }
+
+  Future<void> _stopRecording({required bool keep}) async {
+    if (!_recording) return;
+    _recording = false;
+    _recTimer?.cancel();
+    _recSw.stop();
+    final ms = _recSw.elapsedMilliseconds;
+    final marks = keep ? _buildMarks() : <List<int>>[];
+    final fallback = _recPath;
+    _stamps = [];
+    if (mounted) setState(() {});
+    String? stopped;
+    try {
+      stopped = await _recorder.stop();
+    } catch (_) {}
+    final path = stopped ?? fallback;
+    if (path != null) {
+      if (!keep) {
+        try {
+          await File(path).delete();
+        } catch (_) {}
+      } else {
+        _atts.add(Attachment(
+          id: Store.newId(),
+          type: 'audio',
+          file: path.split('/').last,
+          durationMs: ms,
+          marks: marks,
+        ));
+        if (mounted) setState(() {});
+        _scheduleSave();
+      }
+    }
+    if (!mounted) {
+      try {
+        await _recorder.dispose();
+      } catch (_) {}
+    }
+  }
+
+  void _onPlayPos(Attachment a, int? ms) {
+    if (ms == null) {
+      if (_syncAtt?.id == a.id) _syncMs.value = null;
+      return;
+    }
+    if (a.marks.isEmpty) return;
+    _syncAtt = a;
+    _syncMs.value = ms;
+  }
+
+  String _clock(int s) =>
+      '${(s ~/ 60).toString().padLeft(2, '0')}:${(s % 60).toString().padLeft(2, '0')}';
+
+  Widget _recBar() {
+    return Container(
+      color: const Color(0xFF1C0F0F),
+      padding: const EdgeInsets.fromLTRB(14, 6, 6, 6),
+      child: Row(
+        children: [
+          Container(
+            width: 10,
+            height: 10,
+            decoration: const BoxDecoration(
+                color: Colors.redAccent, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 8),
+          Text(_clock(_recSec),
+              style:
+                  const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(t('rec_hint'),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 12, color: Colors.white54)),
+          ),
+          IconButton(
+            tooltip: t('cancel'),
+            onPressed: () => _stopRecording(keep: false),
+            icon: const Icon(Icons.close_rounded, color: Colors.white54),
+          ),
+          FilledButton(
+            onPressed: () => _stopRecording(keep: true),
+            style: FilledButton.styleFrom(
+              backgroundColor: kOrange,
+              foregroundColor: Colors.black,
+            ),
+            child: Text(t('stop_save')),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Read-only view of the text shown while a synced recording plays:
+  /// each word turns to the accent colour when its moment comes.
+  Widget _syncView(int ms) {
+    final text = _c.document.toPlainText();
+    final marks = [..._syncAtt!.marks]..sort((a, b) => a[0].compareTo(b[0]));
+    const base = TextStyle(fontSize: 17, height: 1.7);
+    final spans = <InlineSpan>[];
+    var cur = 0;
+    for (final m in marks) {
+      final s = m[0].clamp(0, text.length).toInt();
+      final e = m[1].clamp(0, text.length).toInt();
+      if (e <= s || s < cur) continue;
+      if (s > cur) {
+        spans.add(TextSpan(text: text.substring(cur, s), style: base));
+      }
+      final played = m[2] <= ms;
+      spans.add(TextSpan(
+        text: text.substring(s, e),
+        style: base.copyWith(
+          color: played ? kOrange : Colors.white38,
+          fontWeight: played ? FontWeight.w800 : FontWeight.w400,
+        ),
+      ));
+      cur = e;
+    }
+    if (cur < text.length) {
+      spans.add(TextSpan(text: text.substring(cur), style: base));
+    }
+    final rtl = RegExp(r'[\u0600-\u06FF]').hasMatch(text);
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: SizedBox(
+        width: double.infinity,
+        child: Text.rich(
+          TextSpan(children: spans),
+          textDirection: rtl ? TextDirection.rtl : TextDirection.ltr,
+        ),
+      ),
+    );
   }
 
   void _removeAttachment(Attachment a) {
@@ -763,7 +1012,15 @@ class _NoteEditorPageState extends State<NoteEditorPage>
                       () => setState(() => _tools = !_tools),
                       active: _tools),
                   btn(Icons.image_outlined, t('add_image'), _addImage),
-                  btn(Icons.mic_none_rounded, t('record_voice'), _record),
+                  btn(
+                    _recording
+                        ? Icons.stop_circle_rounded
+                        : Icons.mic_none_rounded,
+                    t('record_voice'),
+                    _toggleRecording,
+                    active: _recording,
+                    color: _recording ? Colors.redAccent : null,
+                  ),
                   btn(
                     _dictating
                         ? Icons.stop_circle_outlined
@@ -799,7 +1056,13 @@ class _NoteEditorPageState extends State<NoteEditorPage>
     return PopScope(
       canPop: true,
       onPopInvokedWithResult: (didPop, _) {
-        if (didPop && !_skipFinal) _persist(finalSave: true);
+        if (didPop && !_skipFinal) {
+          if (_recording) {
+            _stopRecording(keep: true).then((_) => _persist(finalSave: true));
+          } else {
+            _persist(finalSave: true);
+          }
+        }
       },
       child: Scaffold(
         appBar: AppBar(
@@ -884,6 +1147,7 @@ class _NoteEditorPageState extends State<NoteEditorPage>
               icon: Icon(Icons.check_rounded, color: kOrange, size: 28),
               tooltip: t('save'),
               onPressed: () async {
+                await _stopRecording(keep: true);
                 await _persist(finalSave: true);
                 _skipFinal = true;
                 if (mounted) Navigator.of(context).pop();
@@ -911,18 +1175,29 @@ class _NoteEditorPageState extends State<NoteEditorPage>
               ),
               _metaRow(),
               Expanded(
-                child: QuillEditor.basic(
-                  controller: _c,
-                  config: QuillEditorConfig(
-                    placeholder: t('start_writing'),
-                    padding: const EdgeInsets.all(16),
-                    autoFocus: widget.note == null,
-                    customStyleBuilder: _customStyle,
-                  ),
+                child: ValueListenableBuilder<int?>(
+                  valueListenable: _syncMs,
+                  builder: (_, ms, __) => (ms != null && _syncAtt != null)
+                      ? _syncView(ms)
+                      : QuillEditor.basic(
+                          controller: _c,
+                          config: QuillEditorConfig(
+                            placeholder: t('start_writing'),
+                            padding: const EdgeInsets.all(16),
+                            autoFocus: widget.note == null,
+                            customStyleBuilder: _customStyle,
+                          ),
+                        ),
                 ),
               ),
+              if (_recording) _recBar(),
               if (_atts.isNotEmpty)
-                AttachmentStrip(items: _atts, onRemove: _removeAttachment),
+                AttachmentStrip(
+                  items: _atts,
+                  onRemove: _removeAttachment,
+                  onChanged: _scheduleSave,
+                  onPosition: _onPlayPos,
+                ),
               AnimatedSize(
                 duration: const Duration(milliseconds: 200),
                 curve: Curves.easeOut,

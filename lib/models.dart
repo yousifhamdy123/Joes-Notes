@@ -3,25 +3,40 @@ class Attachment {
   String type; // 'image' | 'audio'
   String file; // file name inside the app's attachments folder
   int durationMs;
+  String name; // user's label for a recording ('' = default)
+  // For recordings made while typing: [startIndex, endIndex, ms] per word.
+  List<List<int>> marks;
 
   Attachment({
     required this.id,
     required this.type,
     required this.file,
     this.durationMs = 0,
-  });
+    this.name = '',
+    List<List<int>>? marks,
+  }) : marks = marks ?? [];
 
   bool get isImage => type == 'image';
   bool get isAudio => type == 'audio';
 
-  Map<String, dynamic> toJson() =>
-      {'id': id, 'type': type, 'file': file, 'durationMs': durationMs};
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'type': type,
+        'file': file,
+        'durationMs': durationMs,
+        'name': name,
+        'marks': marks,
+      };
 
   factory Attachment.fromJson(Map<String, dynamic> j) => Attachment(
         id: j['id'],
         type: j['type'],
         file: j['file'],
         durationMs: j['durationMs'] ?? 0,
+        name: j['name'] ?? '',
+        marks: ((j['marks'] ?? const []) as List)
+            .map((e) => List<int>.from(e as List))
+            .toList(),
       );
 }
 

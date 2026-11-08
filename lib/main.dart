@@ -3,6 +3,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_quill/flutter_quill.dart' show FlutterQuillLocalizations;
 import 'package:intl/date_symbol_data_local.dart';
 
+import 'app_lock.dart';
 import 'backup.dart';
 import 'l10n.dart';
 import 'notifier.dart';
@@ -59,7 +60,7 @@ class JoesNotesApp extends StatelessWidget {
             data: MediaQuery.of(context).copyWith(
               textScaler: TextScaler.linear(Store.i.fontScale.value),
             ),
-            child: child!,
+            child: LockGate(child: child!),
           ),
           theme: ThemeData(
             brightness: Brightness.dark,

@@ -20,7 +20,15 @@ String _mmss(int totalSeconds) {
 class AttachmentStrip extends StatelessWidget {
   final List<Attachment> items;
   final void Function(Attachment) onRemove;
-  const AttachmentStrip({super.key, required this.items, required this.onRemove});
+  final VoidCallback? onChanged; // a recording was renamed
+  final void Function(Attachment, int?)? onPosition; // playback ms (null = stopped)
+  const AttachmentStrip({
+    super.key,
+    required this.items,
+    required this.onRemove,
+    this.onChanged,
+    this.onPosition,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -36,7 +44,12 @@ class AttachmentStrip extends StatelessWidget {
           return a.isImage
               ? _ImageTile(att: a, onRemove: () => onRemove(a))
               : AudioTile(
-                  key: ValueKey(a.id), att: a, onRemove: () => onRemove(a));
+                  key: ValueKey(a.id),
+                  att: a,
+                  onRemove: () => onRemove(a),
+                  onChanged: onChanged,
+                  onPosition: onPosition,
+                );
         },
       ),
     );
@@ -128,7 +141,15 @@ class ImageViewerPage extends StatelessWidget {
 class AudioTile extends StatefulWidget {
   final Attachment att;
   final VoidCallback onRemove;
-  const AudioTile({super.key, required this.att, required this.onRemove});
+  final VoidCallback? onChanged;
+  final void Function(Attachment, int?)? onPosition;
+  const AudioTile({
+    super.key,
+    required this.att,
+    required this.onRemove,
+    this.onChanged,
+    this.onPosition,
+  });
 
   @override
   State<AudioTile> createState() => _AudioTileState();
@@ -145,9 +166,11 @@ class _AudioTileState extends State<AudioTile> {
     super.initState();
     _subs.add(_player.onPlayerStateChanged.listen((s) {
       if (mounted) setState(() => _playing = s == PlayerState.playing);
+      if (s != PlayerState.playing) widget.onPosition?.call(widget.att, null);
     }));
     _subs.add(_player.onPositionChanged.listen((p) {
       if (mounted) setState(() => _pos = p);
+      widget.onPosition?.call(widget.att, p.inMilliseconds);
     }));
     _subs.add(_player.onPlayerComplete.listen((_) {
       if (mounted) {
@@ -156,6 +179,7 @@ class _AudioTileState extends State<AudioTile> {
           _playing = false;
         });
       }
+      widget.onPosition?.call(widget.att, null);
     }));
   }
 
@@ -166,6 +190,35 @@ class _AudioTileState extends State<AudioTile> {
     }
     _player.dispose();
     super.dispose();
+  }
+
+  Future<void> _rename() async {
+    final ctl = TextEditingController(text: widget.att.name);
+    final v = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(t('rename_rec')),
+        content: TextField(
+          controller: ctl,
+          autofocus: true,
+          onSubmitted: (s) => Navigator.pop(ctx, s),
+          decoration: InputDecoration(hintText: t('voice_note')),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(t('cancel')),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, ctl.text),
+            child: Text(t('save'), style: TextStyle(color: kOrange)),
+          ),
+        ],
+      ),
+    );
+    if (v == null) return;
+    setState(() => widget.att.name = v.trim());
+    widget.onChanged?.call();
   }
 
   Future<void> _toggle() async {
@@ -188,7 +241,7 @@ class _AudioTileState extends State<AudioTile> {
     return Stack(
       children: [
         Container(
-          width: 156,
+          width: 190,
           height: 76,
           padding: const EdgeInsets.symmetric(horizontal: 10),
           decoration: BoxDecoration(
@@ -214,17 +267,40 @@ class _AudioTileState extends State<AudioTile> {
                 ),
               ),
               const SizedBox(width: 10),
-              Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(_mmss(shown),
-                      style: const TextStyle(
-                          fontSize: 15, fontWeight: FontWeight.w700)),
-                  Text(t('voice_note'),
-                      style: const TextStyle(
-                          fontSize: 11, color: Colors.white54)),
-                ],
+              Expanded(
+                child: InkWell(
+                  onTap: _rename,
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(_mmss(shown),
+                          style: const TextStyle(
+                              fontSize: 15, fontWeight: FontWeight.w700)),
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              widget.att.name.isEmpty
+                                  ? t('voice_note')
+                                  : widget.att.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  fontSize: 12, color: Colors.white70),
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          const Icon(Icons.edit_outlined,
+                              size: 12, color: Colors.white38),
+                        ],
+                      ),
+                      if (widget.att.marks.isNotEmpty)
+                        Text(t('synced'),
+                            style: TextStyle(fontSize: 10, color: kOrange)),
+                    ],
+                  ),
+                ),
               ),
             ],
           ),

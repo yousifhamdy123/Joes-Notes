@@ -20,6 +20,7 @@ class Store extends ChangeNotifier {
   String sortMode = 'newest'; // newest | oldest | updated | az
   bool listView = false;
   bool backupReminder = true;
+  bool appLock = false;
 
   // ---- data ----
   List<Note> notes = [];
@@ -46,6 +47,7 @@ class Store extends ChangeNotifier {
     sortMode = _p.getString('sortMode') ?? 'newest';
     listView = _p.getBool('listView') ?? false;
     backupReminder = _p.getBool('backupReminder') ?? true;
+    appLock = _p.getBool('appLock') ?? false;
 
     notes = _decode(_p.getString('notes'), Note.fromJson);
     notebooks = _decode(_p.getString('notebooks'), Notebook.fromJson);
@@ -103,6 +105,12 @@ class Store extends ChangeNotifier {
   Future<void> setListView(bool v) async {
     listView = v;
     await _p.setBool('listView', v);
+    notifyListeners();
+  }
+
+  Future<void> setAppLock(bool v) async {
+    appLock = v;
+    await _p.setBool('appLock', v);
     notifyListeners();
   }
 

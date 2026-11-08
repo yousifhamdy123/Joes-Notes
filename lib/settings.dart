@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'l10n.dart';
+import 'lock.dart';
 import 'store.dart';
 import 'widgets.dart';
 
@@ -103,6 +104,28 @@ class _SettingsSheet extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 8),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  activeColor: kOrange,
+                  title: Text(t('app_lock')),
+                  subtitle: Text(t('app_lock_sub'),
+                      style: const TextStyle(
+                          fontSize: 12, color: Colors.white54)),
+                  value: s.appLock,
+                  onChanged: (v) async {
+                    if (v) {
+                      if (!await deviceCanAuth()) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text(t('auth_unavailable'))));
+                        }
+                        return;
+                      }
+                      if (!await authenticate()) return;
+                    }
+                    await s.setAppLock(v);
+                  },
+                ),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
                   activeColor: kOrange,

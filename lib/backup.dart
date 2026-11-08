@@ -44,7 +44,7 @@ Future<Uint8List> buildBackup() async {
 }
 
 class RestoreResult {
-  int notes = 0, notebooks = 0, tasks = 0, ideas = 0;
+  int notes = 0, notebooks = 0, tasks = 0, ideas = 0, locked = 0;
   bool get nothing => notes + notebooks + tasks + ideas == 0;
 }
 
@@ -74,20 +74,30 @@ Future<RestoreResult> restoreBackup(Uint8List bytes) async {
     }
   }
 
-  final noteIds = s.notes.map((e) => e.id).toSet();
   for (final j in list('notes')) {
-    final n = Note.fromJson(j);
-    if (!noteIds.add(n.id)) continue;
-    for (final a in n.attachments) {
-      final f = arc.findFile('media/${a.file}');
-      if (f == null) continue;
-      final dest = File('${s.attachDirPath}/${a.file}');
-      if (!await dest.exists()) {
-        await dest.writeAsBytes(f.content as List<int>);
+    try {
+      final n = Note.fromJson(j);
+      final idx = s.notes.indexWhere((e) => e.id == n.id);
+      // Existing notes stay, unless the backup copy is newer.
+      if (idx >= 0 && !n.updated.isAfter(s.notes[idx].updated)) continue;
+      for (final a in n.attachments) {
+        final f = arc.findFile('media/${a.file}');
+        if (f == null) continue;
+        final dest = File('${s.attachDirPath}/${a.file}');
+        if (!await dest.exists()) {
+          await dest.writeAsBytes(f.content as List<int>);
+        }
       }
+      if (idx >= 0) {
+        s.notes[idx] = n;
+      } else {
+        s.notes.add(n);
+      }
+      r.notes++;
+      if (n.locked) r.locked++;
+    } catch (_) {
+      // one damaged note must not stop the whole restore
     }
-    s.notes.add(n);
-    r.notes++;
   }
 
   final taskIds = s.tasks.map((e) => e.id).toSet();
@@ -183,7 +193,8 @@ class _BackupSheetState extends State<_BackupSheet> {
       if (r.nothing) {
         _msg(t('restore_nothing'));
       } else {
-        _msg('${t('restore_done')}: ${r.notes} ${t('note_word')}، '
+        _msg('${t('restore_done')}: ${r.notes} ${t('note_word')}'
+            '${r.locked > 0 ? ' (${r.locked} 🔒)' : ''}، '
             '${r.tasks} ${t('tasks_word')}، ${r.ideas} ${t('ideas_word')}');
       }
     } catch (_) {
